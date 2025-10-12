@@ -1,10 +1,10 @@
 package server
 
 import (
+	"GOtify/internal/handlers"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
-	"customspotify/internal/handlers"
 	"encoding/hex"
 	"fmt"
 	"net/http"

@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"customspotify/internal/security"
+	"GOtify/internal/security"
 	"net/http"
 	"strconv"
 	"time"
@@ -29,7 +29,7 @@ func (h *TokenHandler) Generate(c *gin.Context) {
 
 	token, exp := h.signer.Generate(file, ttl)
 	c.JSON(http.StatusOK, gin.H{
-		"file":  file,
+		"file":    file,
 		"expires": exp,
 		"url":     "/stream/" + file + "?t=" + token + "&e=" + strconv.FormatInt(exp, 10),
 	})

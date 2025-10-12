@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"GOtify/internal/security"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"customspotify/internal/security"
 
 	"github.com/gin-gonic/gin"
 )

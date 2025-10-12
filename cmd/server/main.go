@@ -1,7 +1,7 @@
 package main
 
 import (
-	"customspotify/internal/server"
+	"GOtify/internal/server"
 	"os"
 
 	"github.com/joho/godotenv"
