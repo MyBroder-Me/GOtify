@@ -2,6 +2,9 @@ package server
 
 import (
 	"GOtify/internal/handlers"
+	"GOtify/internal/storage"
+	"GOtify/internal/transcode"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -21,9 +24,16 @@ import (
 type Server struct {
 	engine *gin.Engine
 	root   string
+	store  *storage.Store
+	bucket *storage.BucketClient
 }
 
 func New(root string) *Server {
+	ctx := context.Background()
+	store, err := storage.NewStore(ctx)
+	if err != nil {
+		panic(err)
+	}
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
@@ -45,15 +55,42 @@ func New(root string) *Server {
 	limiter := tollbooth.NewLimiter(10, nil) // 10 req/s
 	r.Use(tollbooth_gin.LimitHandler(limiter))
 
-	// Routes
+	// Handlers
 	hToken := handlers.NewTokenHandler(secret)
 	hFile := handlers.NewFileHandler(root)
+	bucketClient, err := storage.NewBucketClientFromEnv()
+	if err != nil {
+		panic(err)
+	}
+	segmentSeconds := parseSegmentSeconds(os.Getenv("HLS_SEGMENT_SECONDS"))
+	variantCfg := parseVariantConfig(os.Getenv("HLS_AUDIO_VARIANTS"))
+	handlerCfg := handlers.SongHandlerConfig{
+		BucketBaseURL:  strings.TrimSpace(os.Getenv("SUPABASE_BUCKET_PUBLIC_URL")),
+		FFmpegBin:      strings.TrimSpace(os.Getenv("FFMPEG_BIN")),
+		FFProbeBin:     strings.TrimSpace(os.Getenv("FFPROBE_BIN")),
+		SegmentSeconds: segmentSeconds,
+		Variants:       variantCfg,
+	}
+	hSong, err := handlers.NewSongHandler(store, bucketClient, handlerCfg)
+	if err != nil {
+		panic(err)
+	}
+
+	// Routes
+	r.GET("/health", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
 	r.GET("/token/:file", hToken.Generate)
 	authorized := r.Group("/stream", AuthMiddleware(secret))
 	{
 		authorized.GET("/:file/*quality", hFile.Serve)
 	}
-	return &Server{engine: r, root: root}
+	r.POST("/songs", hSong.Create)
+	r.GET("/songs", hSong.List)
+	r.GET("/songs/:id", hSong.Get)
+	r.PUT("/songs/:id", hSong.Update)
+	r.DELETE("/songs/:id", hSong.Delete)
+	return &Server{engine: r, root: root, store: store, bucket: bucketClient}
 }
 
 func (s *Server) Run(addr string) {
@@ -76,12 +113,10 @@ func RequireSecret(secret string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-
 		if subtle.ConstantTimeCompare([]byte(input), secretBytes) != 1 {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
-
 		c.Next()
 	}
 }
@@ -110,4 +145,45 @@ func AuthMiddleware(secret []byte) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func parseSegmentSeconds(value string) int {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(trimmed)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return seconds
+}
+
+func parseVariantConfig(value string) []transcode.Variant {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	parts := strings.Split(trimmed, ",")
+	var variants []transcode.Variant
+	seen := map[int]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		num, err := strconv.Atoi(part)
+		if err != nil || num <= 0 {
+			continue
+		}
+		if seen[num] {
+			continue
+		}
+		seen[num] = true
+		variants = append(variants, transcode.Variant{
+			Name:        fmt.Sprintf("%dk", num),
+			BitrateKbps: num,
+		})
+	}
+	return variants
 }
