@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -16,16 +17,30 @@ func NewFileHandler(root string) *FileHandler {
 }
 
 func (h *FileHandler) Serve(c *gin.Context) {
-	folder := c.Param("folder")
-	file := c.Param("file")
+	folder := c.Param("file")
+	raw := c.Param("quality")
 
-	// If no file is specified, default to master.m3u8, else choose quality 64k, 128k or 192k
-	if file == "" || file == "/" {
-		file = "master"
-	} else {
-		file = strings.TrimPrefix(file, "/")
+	filename := resolveFilename(raw)
+
+	if strings.Contains(folder, "..") || strings.Contains(filename, "..") {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
 	}
-	file = strings.TrimSuffix(file, ".m3u8") + ".m3u8"
-	fullPath := filepath.Join(h.root, folder, file)
+
+	fullPath := filepath.Join(h.root, folder, filename)
 	c.File(fullPath)
+}
+
+func resolveFilename(raw string) string {
+	if raw == "" || raw == "/" {
+		return "master.m3u8"
+	}
+
+	name := strings.TrimPrefix(raw, "/")
+
+	if i := strings.LastIndex(name, "."); i != -1 {
+		name = name[:i]
+	}
+
+	return name + ".m3u8"
 }
