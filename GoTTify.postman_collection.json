@@ -29,6 +29,39 @@
 				}
 			},
 			"response": []
+		},
+		{
+			"name": "Upload Song",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "X-API-Key",
+						"value": "{{API_KEY}}",
+						"type": "text"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"name\":\"Daddy Yankee & Snow - Con Calma\",\n    \"source_path\":\"/Users/mykytaryasny/Downloads/Daddy Yankee & Snow - Con Calma.mp3\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "localhost:8080/songs",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"songs"
+					]
+				}
+			},
+			"response": []
 		}
 	],
 	"event": [
