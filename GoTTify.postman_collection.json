@@ -1,0 +1,77 @@
+{
+	"info": {
+		"_postman_id": "da1d4979-29ee-4714-9756-90c49f74e119",
+		"name": "GoTTify",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "26497057"
+	},
+	"item": [
+		{
+			"name": "Healthy",
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "X-API-Key",
+						"value": "{{API_KEY}}",
+						"type": "text"
+					}
+				],
+				"url": {
+					"raw": "localhost:8080/health",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"health"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"requests": {},
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"packages": {},
+				"requests": {},
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "API_KEY",
+			"value": "your_key"
+		},
+		{
+			"key": "file",
+			"value": "example"
+		},
+		{
+			"key": "URL_VALUE",
+			"value": ""
+		},
+		{
+			"key": "song",
+			"value": "",
+			"type": "default"
+		}
+	]
+}
