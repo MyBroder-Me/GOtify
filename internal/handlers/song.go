@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -58,12 +61,12 @@ type updateSongForm struct {
 	Name string `form:"name" binding:"required"`
 }
 
-type songResponse struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Duration     int32  `json:"duration"`
-	BucketFolder string `json:"bucket_folder"`
-}
+// type songResponse struct {
+// 	ID           string `json:"id"`
+// 	Name         string `json:"name"`
+// 	Duration     int32  `json:"duration"`
+// 	BucketFolder string `json:"bucket_folder"`
+// }
 
 var slugRegex = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -178,12 +181,11 @@ func (h *SongHandler) Create(c *gin.Context) {
 		return
 	}
 
-	bucketFolder := joinBucketPath(h.bucketBaseURL, slug, "master.m3u8")
 	song := storage.Song{
 		ID:              uuid.NewString(),
 		Name:            form.Name,
-		DurationSeconds: durationSeconds,
-		BucketFolder:    bucketFolder,
+		Duration: durationSeconds,
+		BucketFolder:    slug,
 	}
 
 	if err := h.store.UpsertSong(c.Request.Context(), song); err != nil {
@@ -191,7 +193,7 @@ func (h *SongHandler) Create(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, songToResponse(song))
+	c.JSON(http.StatusCreated, song)
 }
 
 func (h *SongHandler) Get(c *gin.Context) {
@@ -209,7 +211,7 @@ func (h *SongHandler) Get(c *gin.Context) {
 		writeError(c, status, err)
 		return
 	}
-	c.JSON(http.StatusOK, songToResponse(song))
+	c.JSON(http.StatusOK, song)
 }
 
 func (h *SongHandler) List(c *gin.Context) {
@@ -219,11 +221,11 @@ func (h *SongHandler) List(c *gin.Context) {
 		return
 	}
 
-	resp := make([]songResponse, 0, len(songs))
+	resp := make([]storage.Song, 0, len(songs))
 	for _, song := range songs {
-		resp = append(resp, songToResponse(song))
+		resp = append(resp, song)
 	}
-
+	log.Println("Listing songs:", resp)
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -269,8 +271,8 @@ func (h *SongHandler) Update(c *gin.Context) {
 
 	existingFolder := h.folderFromBucketPath(existing.BucketFolder)
 	targetFolder := existingFolder
-	targetBucketFolder := existing.BucketFolder
-	durationSeconds := existing.DurationSeconds
+	targetBucketKey := existing.BucketFolder
+	durationSeconds := existing.Duration
 
 	if newAudioProvided {
 		audioPath, cleanup, err := persistUploadedFile(fileHeader)
@@ -317,22 +319,22 @@ func (h *SongHandler) Update(c *gin.Context) {
 			writeError(c, http.StatusBadGateway, err)
 			return
 		}
-		targetBucketFolder = joinBucketPath(h.bucketBaseURL, targetFolder, "master.m3u8")
+		targetBucketKey = targetFolder
 	} else {
 		// Mantiene los assets existentes; solo se actualiza metadata.
 		if existingFolder == "" {
 			targetFolder = newSlug
-			targetBucketFolder = joinBucketPath(h.bucketBaseURL, targetFolder, "master.m3u8")
+			targetBucketKey = targetFolder
 		} else {
-			targetBucketFolder = existing.BucketFolder
+			targetBucketKey = existing.BucketFolder
 		}
 	}
 
 	updated := storage.Song{
 		ID:              existing.ID,
 		Name:            form.Name,
-		DurationSeconds: durationSeconds,
-		BucketFolder:    targetBucketFolder,
+		Duration: 			 durationSeconds,
+		BucketFolder:    targetBucketKey,
 	}
 
 	if err := h.store.UpsertSong(c.Request.Context(), updated); err != nil {
@@ -340,7 +342,7 @@ func (h *SongHandler) Update(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, songToResponse(updated))
+	c.JSON(http.StatusOK, updated)
 }
 
 func (h *SongHandler) Delete(c *gin.Context) {
@@ -376,14 +378,18 @@ func (h *SongHandler) Delete(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func songToResponse(s storage.Song) songResponse {
-	return songResponse{
-		ID:           s.ID,
-		Name:         s.Name,
-		Duration:     s.DurationSeconds,
-		BucketFolder: s.BucketFolder,
-	}
-}
+// func (h *SongHandler) songToResponse(s storage.Song) songResponse {
+// 	masterKey := strings.TrimSpace(s.BucketFolder)
+// 	if masterKey != "" && !strings.HasSuffix(strings.ToLower(masterKey), ".m3u8") {
+// 		masterKey = path.Join(masterKey, "master.m3u8")
+// 	}
+// 	return songResponse{
+// 		ID:           s.ID,
+// 		Name:         s.Name,
+// 		Duration:     s.DurationSeconds,
+// 		BucketFolder: s.BucketFolder,
+// 	}
+// }
 
 func writeError(c *gin.Context, status int, err error) {
 	c.JSON(status, gin.H{"error": err.Error()})
@@ -400,6 +406,57 @@ func slugify(input string) string {
 		slug = strconv.FormatInt(int64(len(input)), 10)
 	}
 	return slug
+}
+
+func (h *SongHandler) folderFromBucketPath(bucketPath string) string {
+	if bucketPath == "" {
+		return ""
+	}
+
+	normalized := strings.ReplaceAll(strings.TrimSpace(bucketPath), "\\", "/")
+	if idx := strings.Index(normalized, "?"); idx != -1 {
+		normalized = normalized[:idx]
+	}
+
+	if u, err := url.Parse(normalized); err == nil && u.Path != "" {
+		normalized = u.Path
+	}
+
+	lower := strings.ToLower(normalized)
+	if strings.Contains(lower, "/storage/v1/object/") {
+		parts := strings.SplitN(normalized, "/storage/v1/object/", 2)
+		if len(parts) == 2 {
+			normalized = parts[1]
+		}
+	}
+
+	normalized = strings.TrimPrefix(normalized, "public/")
+	normalized = strings.TrimPrefix(normalized, "/")
+
+	if strings.HasSuffix(strings.ToLower(normalized), ".m3u8") {
+		normalized = path.Dir(normalized)
+	}
+
+	normalized = strings.Trim(normalized, "/")
+	if strings.Contains(normalized, "/") {
+		normalized = path.Base(normalized)
+	}
+
+	return normalized
+}
+
+func (h *SongHandler) publicBucketURL(objectKey string) string {
+	key := strings.ReplaceAll(strings.TrimSpace(objectKey), "\\", "/")
+	key = strings.Trim(key, "/")
+	if key == "" {
+		base := strings.TrimSpace(h.bucketBaseURL)
+		return strings.TrimRight(base, "/")
+	}
+	if h.bucketBaseURL == "" {
+		return key
+	}
+	parts := strings.Split(key, "/")
+	return joinBucketPath(h.bucketBaseURL, parts...)
 }
 
 func joinBucketPath(base string, parts ...string) string {
@@ -446,23 +503,4 @@ func persistUploadedFile(file *multipart.FileHeader) (string, func(), error) {
 	}
 
 	return tempFile.Name(), cleanup, nil
-}
-
-func (h *SongHandler) folderFromBucketPath(bucketPath string) string {
-	if bucketPath == "" {
-		return ""
-	}
-	cleanBase := strings.TrimRight(h.bucketBaseURL, "/")
-	rel := bucketPath
-	if cleanBase != "" && strings.HasPrefix(rel, cleanBase+"/") {
-		rel = strings.TrimPrefix(rel, cleanBase+"/")
-	}
-	rel = strings.TrimLeft(rel, "/")
-	if rel == "" {
-		return ""
-	}
-	if idx := strings.Index(rel, "/"); idx != -1 {
-		return rel[:idx]
-	}
-	return rel
 }

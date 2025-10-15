@@ -18,7 +18,7 @@ type Store struct {
 type Song struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
-	DurationSeconds int32  `json:"duration_seconds"`
+	Duration int32  `json:"duration_seconds"`
 	BucketFolder      string `json:"bucket_folder"`
 }
 

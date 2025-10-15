@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -50,6 +51,13 @@ func (f *fakeStorage) UploadFile(bucketID, relativePath string, data io.Reader, 
 
 func (f *fakeStorage) RemoveFile(bucketID string, paths []string) ([]storage_go.FileUploadResponse, error) {
 	f.deletions = append(f.deletions, append([]string{}, paths...))
+	return nil, nil
+}
+
+func (f *fakeStorage) CreateSignedUrl(bucketID string, filePath string, expiresIn int) (storage_go.SignedUrlResponse, error) {
+	return storage_go.SignedUrlResponse{SignedURL: fmt.Sprintf("https://signed/%s/%s?ttl=%d", bucketID, filePath, expiresIn)}, nil
+}
+func (f *fakeStorage) DownloadFile(bucketID string, filePath string, _ ...storage_go.UrlOptions) ([]byte, error) {
 	return nil, nil
 }
 
