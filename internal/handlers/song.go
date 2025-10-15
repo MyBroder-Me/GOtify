@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"regexp"
@@ -48,20 +50,18 @@ type SongHandler struct {
 	variants       []transcode.Variant
 }
 
-type createSongPayload struct {
-	Name       string `json:"name" binding:"required"`
-	SourcePath string `json:"source_path" binding:"required"`
+type createSongForm struct {
+	Name string `form:"name" binding:"required"`
 }
 
-type updateSongPayload struct {
-	Name       string `json:"name" binding:"required"`
-	SourcePath string `json:"source_path"` // opcional: regenerar segmentos si se entrega
+type updateSongForm struct {
+	Name string `form:"name" binding:"required"`
 }
 
 type songResponse struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Duration   int32  `json:"duration"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Duration     int32  `json:"duration"`
 	BucketFolder string `json:"bucket_folder"`
 }
 
@@ -119,25 +119,42 @@ func defaultBucketBase() string {
 }
 
 func (h *SongHandler) Create(c *gin.Context) {
-	var body createSongPayload
-	if err := c.ShouldBindJSON(&body); err != nil {
+	var form createSongForm
+	if err := c.ShouldBind(&form); err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
 	}
 
-	slug := slugify(body.Name)
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		if errors.Is(err, http.ErrMissingFile) {
+			writeError(c, http.StatusBadRequest, fmt.Errorf("archivo de audio requerido"))
+			return
+		}
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	audioPath, cleanup, err := persistUploadedFile(fileHeader)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+	defer cleanup()
+
+	slug := slugify(form.Name)
 	if slug == "" {
 		writeError(c, http.StatusBadRequest, fmt.Errorf("nombre invalido"))
 		return
 	}
 
-	durationSeconds, err := transcode.ProbeDuration(c.Request.Context(), h.ffprobeBin, body.SourcePath)
+	durationSeconds, err := transcode.ProbeDuration(c.Request.Context(), h.ffprobeBin, audioPath)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, fmt.Errorf("no se pudo calcular la duracion: %w", err))
 		return
 	}
 
-	files, err := transcode.GenerateHLS(c.Request.Context(), body.SourcePath, transcode.Config{
+	files, err := transcode.GenerateHLS(c.Request.Context(), audioPath, transcode.Config{
 		BinPath:        h.ffmpegBin,
 		SegmentSeconds: h.segmentSeconds,
 		Variants:       h.variants,
@@ -164,9 +181,9 @@ func (h *SongHandler) Create(c *gin.Context) {
 	bucketFolder := joinBucketPath(h.bucketBaseURL, slug, "master.m3u8")
 	song := storage.Song{
 		ID:              uuid.NewString(),
-		Name:            body.Name,
+		Name:            form.Name,
 		DurationSeconds: durationSeconds,
-		BucketFolder:      bucketFolder,
+		BucketFolder:    bucketFolder,
 	}
 
 	if err := h.store.UpsertSong(c.Request.Context(), song); err != nil {
@@ -217,10 +234,19 @@ func (h *SongHandler) Update(c *gin.Context) {
 		return
 	}
 
-	var body updateSongPayload
-	if err := c.ShouldBindJSON(&body); err != nil {
+	var form updateSongForm
+	if err := c.ShouldBind(&form); err != nil {
 		writeError(c, http.StatusBadRequest, err)
 		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		if !errors.Is(err, http.ErrMissingFile) {
+			writeError(c, http.StatusBadRequest, err)
+			return
+		}
+		fileHeader = nil
 	}
 
 	existing, err := h.store.GetSong(c.Request.Context(), id)
@@ -233,27 +259,34 @@ func (h *SongHandler) Update(c *gin.Context) {
 		return
 	}
 
-	newSlug := slugify(body.Name)
+	newSlug := slugify(form.Name)
 	if newSlug == "" {
 		writeError(c, http.StatusBadRequest, fmt.Errorf("nombre invalido"))
 		return
 	}
 
-	regenerate := strings.TrimSpace(body.SourcePath) != ""
+	newAudioProvided := fileHeader != nil
 
 	existingFolder := h.folderFromBucketPath(existing.BucketFolder)
 	targetFolder := existingFolder
 	targetBucketFolder := existing.BucketFolder
 	durationSeconds := existing.DurationSeconds
 
-	if regenerate {
-		durationSeconds, err = transcode.ProbeDuration(c.Request.Context(), h.ffprobeBin, body.SourcePath)
+	if newAudioProvided {
+		audioPath, cleanup, err := persistUploadedFile(fileHeader)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, err)
+			return
+		}
+		defer cleanup()
+
+		durationSeconds, err = transcode.ProbeDuration(c.Request.Context(), h.ffprobeBin, audioPath)
 		if err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Errorf("no se pudo calcular la duracion: %w", err))
 			return
 		}
 
-		files, err := transcode.GenerateHLS(c.Request.Context(), body.SourcePath, transcode.Config{
+		files, err := transcode.GenerateHLS(c.Request.Context(), audioPath, transcode.Config{
 			BinPath:        h.ffmpegBin,
 			SegmentSeconds: h.segmentSeconds,
 			Variants:       h.variants,
@@ -297,9 +330,9 @@ func (h *SongHandler) Update(c *gin.Context) {
 
 	updated := storage.Song{
 		ID:              existing.ID,
-		Name:            body.Name,
+		Name:            form.Name,
 		DurationSeconds: durationSeconds,
-		BucketFolder:      targetBucketFolder,
+		BucketFolder:    targetBucketFolder,
 	}
 
 	if err := h.store.UpsertSong(c.Request.Context(), updated); err != nil {
@@ -345,9 +378,9 @@ func (h *SongHandler) Delete(c *gin.Context) {
 
 func songToResponse(s storage.Song) songResponse {
 	return songResponse{
-		ID:         s.ID,
-		Name:       s.Name,
-		Duration:   s.DurationSeconds,
+		ID:           s.ID,
+		Name:         s.Name,
+		Duration:     s.DurationSeconds,
 		BucketFolder: s.BucketFolder,
 	}
 }
@@ -379,6 +412,40 @@ func joinBucketPath(base string, parts ...string) string {
 		return suffix
 	}
 	return cleanBase + "/" + suffix
+}
+
+func persistUploadedFile(file *multipart.FileHeader) (string, func(), error) {
+	if file == nil {
+		return "", nil, fmt.Errorf("archivo de audio requerido")
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return "", nil, fmt.Errorf("no se pudo leer el archivo: %w", err)
+	}
+	defer src.Close()
+
+	tempFile, err := os.CreateTemp("", "gotify-audio-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("no se pudo crear archivo temporal: %w", err)
+	}
+
+	cleanup := func() {
+		_ = os.Remove(tempFile.Name())
+	}
+
+	if _, err := io.Copy(tempFile, src); err != nil {
+		tempFile.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("no se pudo copiar archivo subido: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("no se pudo cerrar archivo temporal: %w", err)
+	}
+
+	return tempFile.Name(), cleanup, nil
 }
 
 func (h *SongHandler) folderFromBucketPath(bucketPath string) string {

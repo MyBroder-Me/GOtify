@@ -139,23 +139,9 @@ func TestResolveFilename(t *testing.T) {
 func TestRewritePlaylistAddsPrefixToVariantEntries(t *testing.T) {
 	data := []byte("variant.m3u8\n")
 	query := "t=abc&e=123"
-	prefix := "album/"
 
-	got := string(rewritePlaylist(data, query, prefix))
-	want := "album/variant.m3u8?t=abc&e=123\n"
-
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
-func TestRewritePlaylistLeavesSegmentsWithoutPrefix(t *testing.T) {
-	data := []byte("segment.ts\n")
-	query := "t=abc&e=123"
-	prefix := "album/"
-
-	got := string(rewritePlaylist(data, query, prefix))
-	want := "segment.ts?t=abc&e=123\n"
+	got := string(rewritePlaylist(data, query))
+	want := "variant.m3u8?t=abc&e=123\n"
 
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)

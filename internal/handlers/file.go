@@ -3,6 +3,7 @@ package handlers
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,15 +30,10 @@ func (h *FileHandler) Serve(c *gin.Context) {
 		return
 	}
 
-	prefix := ""
-	if folder != "" {
-		prefix = folder + "/"
-	}
-
 	if trimmed == "" {
 		filename := "master.m3u8"
 		fullPath := filepath.Join(h.root, folder, filename)
-		if err := h.servePlaylist(c, fullPath, c.Request.URL.RawQuery, prefix); err != nil {
+		if err := h.servePlaylist(c, fullPath, c.Request.URL.RawQuery); err != nil {
 			c.AbortWithStatus(http.StatusNotFound)
 		}
 		return
@@ -46,7 +42,7 @@ func (h *FileHandler) Serve(c *gin.Context) {
 	if strings.HasSuffix(strings.ToLower(trimmed), ".m3u8") || !strings.Contains(trimmed, ".") {
 		filename := resolveFilename(raw)
 		fullPath := filepath.Join(h.root, folder, filename)
-		if err := h.servePlaylist(c, fullPath, c.Request.URL.RawQuery, prefix); err != nil {
+		if err := h.servePlaylist(c, fullPath, c.Request.URL.RawQuery); err != nil {
 			c.AbortWithStatus(http.StatusNotFound)
 		}
 		return
@@ -70,7 +66,7 @@ func resolveFilename(raw string) string {
 	return name + ".m3u8"
 }
 
-func (h *FileHandler) servePlaylist(c *gin.Context, path string, query string, prefix string) error {
+func (h *FileHandler) servePlaylist(c *gin.Context, path string, query string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -80,13 +76,13 @@ func (h *FileHandler) servePlaylist(c *gin.Context, path string, query string, p
 		c.Data(http.StatusOK, "application/vnd.apple.mpegurl", data)
 		return nil
 	}
-
-	rewritten := rewritePlaylist(data, query, prefix)
+	rewritten := rewritePlaylist(data, query)
+	fmt.Println("Rewritted playlist:", string(rewritten))
 	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", rewritten)
 	return nil
 }
 
-func rewritePlaylist(data []byte, query string, prefix string) []byte {
+func rewritePlaylist(data []byte, query string) []byte {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	var builder strings.Builder
 
@@ -102,13 +98,13 @@ func rewritePlaylist(data []byte, query string, prefix string) []byte {
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 			rewritten := trimmed
 
-			if prefix != "" && needsRelativePrefix(trimmed, prefix) {
-				if idx := strings.Index(rewritten, "?"); idx != -1 {
-					rewritten = prefix + rewritten[:idx] + rewritten[idx:]
-				} else {
-					rewritten = prefix + rewritten
-				}
-			}
+			// if prefix != "" && needsRelativePrefix(trimmed, prefix) {
+			// 	if idx := strings.Index(rewritten, "?"); idx != -1 {
+			// 		rewritten = prefix + rewritten[:idx] + rewritten[idx:]
+			// 	} else {
+			// 		rewritten = prefix + rewritten
+			// 	}
+			// }
 
 			if strings.Contains(rewritten, "?") {
 				rewritten += "&" + query
