@@ -4,127 +4,89 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
-	"time"
+	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	postgrest "github.com/supabase-community/postgrest-go"
+	supabase "github.com/supabase-community/supabase-go"
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	client *supabase.Client
 }
 
 type Song struct {
-	ID              string
-	Name            string
-	DurationSeconds int32
-	BucketPath      string
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	DurationSeconds int32  `json:"duration_seconds"`
+	BucketFolder      string `json:"bucket_folder"`
 }
 
 var ErrNotFound = errors.New("song not found")
 
-func NewStore(ctx context.Context) (*Store, error) {
-	password := url.QueryEscape(os.Getenv("SUPABASE_DB_PASSWORD"))
-	dsn := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s",
-		os.Getenv("SUPABASE_DB_USER"),
-		password,
-		os.Getenv("SUPABASE_DB_HOST"),
-		os.Getenv("SUPABASE_DB_PORT"),
-		os.Getenv("SUPABASE_DB_NAME"),
-	)
-
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, err
+func NewStore(_ context.Context) (*Store, error) {
+	projectURL := strings.TrimSpace(os.Getenv("SUPABASE_URL"))
+	serviceKey := strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_KEY"))
+	if projectURL == "" || serviceKey == "" {
+		return nil, fmt.Errorf("supabase url/service key not configured")
 	}
-	cfg.MaxConns = 5
-	cfg.MaxConnIdleTime = 5 * time.Minute
 
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	client, err := supabase.NewClient(projectURL, serviceKey, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Store{pool: pool}, nil
+	return &Store{client: client}, nil
 }
 
-func (s *Store) Close() {
-	if s == nil || s.pool == nil {
-		return
-	}
-	s.pool.Close()
-}
-
-func (s *Store) UpsertSong(ctx context.Context, song Song) error {
-	const query = `
-		INSERT INTO songs (id, name, duration_seconds, bucket_path)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO UPDATE
-		SET name = EXCLUDED.name,
-		    duration_seconds = EXCLUDED.duration_seconds,
-		    bucket_path = EXCLUDED.bucket_path`
-	_, err := s.pool.Exec(ctx, query, song.ID, song.Name, song.DurationSeconds, song.BucketPath)
+func (s *Store) UpsertSong(_ context.Context, song Song) error {
+	_, _, err := s.client.
+		From("songs").
+		Upsert(song, "id", "minimal", "").
+		Execute()
 	return err
 }
 
-func (s *Store) GetSong(ctx context.Context, id string) (Song, error) {
-	const query = `
-		SELECT id, name, duration_seconds, bucket_path
-		FROM songs
-		WHERE id = $1`
-	row := s.pool.QueryRow(ctx, query, id)
-	return scanSong(row)
+func (s *Store) GetSong(_ context.Context, id string) (Song, error) {
+	var songs []Song
+	_, err := s.client.
+		From("songs").
+		Select("*", "", false).
+		Eq("id", id).
+		ExecuteTo(&songs)
+	if err != nil {
+		return Song{}, err
+	}
+	if len(songs) == 0 {
+		return Song{}, ErrNotFound
+	}
+	return songs[0], nil
 }
 
-func (s *Store) ListSongs(ctx context.Context) ([]Song, error) {
-	const query = `
-		SELECT id, name, duration_seconds, bucket_path
-		FROM songs
-		ORDER BY name`
-	rows, err := s.pool.Query(ctx, query)
+func (s *Store) ListSongs(_ context.Context) ([]Song, error) {
+	var songs []Song
+	_, err := s.client.
+		From("songs").
+		Select("*", "", false).
+		Order("name", &postgrest.OrderOpts{Ascending: true}).
+		ExecuteTo(&songs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var songs []Song
-	for rows.Next() {
-		song, err := scanSong(rows)
-		if err != nil {
-			return nil, err
-		}
-		songs = append(songs, song)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	return songs, nil
 }
 
-func (s *Store) DeleteSong(ctx context.Context, id string) error {
-	const query = `DELETE FROM songs WHERE id = $1`
-	tag, err := s.pool.Exec(ctx, query, id)
+func (s *Store) DeleteSong(_ context.Context, id string) error {
+	_, count, err := s.client.
+		From("songs").
+		Delete("minimal", "exact").
+		Eq("id", id).
+		Execute()
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if count == 0 {
 		return ErrNotFound
 	}
 	return nil
-}
-
-func scanSong(row pgx.Row) (Song, error) {
-	var song Song
-	if err := row.Scan(&song.ID, &song.Name, &song.DurationSeconds, &song.BucketPath); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Song{}, ErrNotFound
-		}
-		return Song{}, err
-	}
-	return song, nil
 }

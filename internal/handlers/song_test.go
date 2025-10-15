@@ -76,8 +76,8 @@ func TestSongHandlerCreate(t *testing.T) {
 	if !ok {
 		t.Fatalf("song not persisted")
 	}
-	if song.BucketPath == "" {
-		t.Errorf("bucket path not set")
+	if song.BucketFolder == "" {
+		t.Errorf("bucket folder not set")
 	}
 	if song.DurationSeconds == 0 {
 		t.Errorf("duration not populated")
@@ -92,7 +92,7 @@ func TestSongHandlerUpdateRegeneratesAssets(t *testing.T) {
 		ID:              "song-1",
 		Name:            "Old Song",
 		DurationSeconds: 200,
-		BucketPath:      "https://example.com/storage/old-song/master.m3u8",
+		BucketFolder:      "https://example.com/storage/old-song/master.m3u8",
 	}
 
 	bucket := &fakeBucket{}
@@ -139,8 +139,8 @@ func TestSongHandlerUpdateRegeneratesAssets(t *testing.T) {
 	if updated.Name != "New Song" {
 		t.Errorf("unexpected name: %s", updated.Name)
 	}
-	if !strings.Contains(updated.BucketPath, "new-song") {
-		t.Errorf("bucket path not updated: %s", updated.BucketPath)
+	if !strings.Contains(updated.BucketFolder, "new-song") {
+		t.Errorf("bucket folder not updated: %s", updated.BucketFolder)
 	}
 	if updated.DurationSeconds == existingBefore.DurationSeconds {
 		t.Errorf("duration not recalculated")
@@ -154,7 +154,7 @@ func TestSongHandlerDelete(t *testing.T) {
 	store.songs["song-1"] = storage.Song{
 		ID:         "song-1",
 		Name:       "Song",
-		BucketPath: "https://example.com/storage/song/master.m3u8",
+		BucketFolder: "https://example.com/storage/song/master.m3u8",
 	}
 
 	bucket := &fakeBucket{}

@@ -1,93 +1,156 @@
 package storage
 
 import (
-	"errors"
-	"reflect"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestScanSongSuccess(t *testing.T) {
-	row := fakeRow{
-		values: []any{
-			"id-1",
-			"Song",
-			int32(180),
-			"https://example/master.m3u8",
-		},
-	}
+func TestNewStoreMissingEnv(t *testing.T) {
+	t.Setenv("SUPABASE_URL", "")
+	t.Setenv("SUPABASE_SERVICE_KEY", "")
 
-	song, err := scanSong(row)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if song.ID != "id-1" || song.Name != "Song" || song.DurationSeconds != 180 || song.BucketPath != "https://example/master.m3u8" {
-		t.Fatalf("unexpected song: %#v", song)
+	if _, err := NewStore(context.Background()); err == nil {
+		t.Fatalf("expected error when env vars missing")
 	}
 }
 
-func TestScanSongNotFound(t *testing.T) {
-	row := fakeRow{err: pgx.ErrNoRows}
-	_, err := scanSong(row)
-	if !errors.Is(err, ErrNotFound) {
+func TestStoreUpsertSong(t *testing.T) {
+	var req *http.Request
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		req = r
+		defer r.Body.Close()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read body: %v", err)
+		}
+		if !strings.Contains(string(body), `"id":"song-1"`) {
+			t.Fatalf("unexpected body: %s", body)
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+	store := newTestStore(t, handler)
+
+	err := store.UpsertSong(context.Background(), Song{
+		ID:              "song-1",
+		Name:            "Test",
+		DurationSeconds: 120,
+		BucketFolder:      "bucket/master.m3u8",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req == nil {
+		t.Fatalf("request not captured")
+	}
+	if req.Method != http.MethodPost {
+		t.Fatalf("expected POST, got %s", req.Method)
+	}
+	if req.URL.Path != "/rest/v1/songs" {
+		t.Fatalf("unexpected path: %s", req.URL.Path)
+	}
+	if !strings.Contains(req.URL.RawQuery, "on_conflict=id") {
+		t.Fatalf("expected on_conflict query, got %s", req.URL.RawQuery)
+	}
+}
+
+func TestStoreGetSongNotFound(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}
+	store := newTestStore(t, handler)
+
+	_, err := store.GetSong(context.Background(), "missing")
+	if err == nil || err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 
-func TestScanSongOtherError(t *testing.T) {
-	expected := errors.New("boom")
-	row := fakeRow{err: expected}
-	_, err := scanSong(row)
-	if !errors.Is(err, expected) {
-		t.Fatalf("expected error %v, got %v", expected, err)
+func TestStoreGetSongSuccess(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := []Song{{
+			ID:              "song-1",
+			Name:            "Test",
+			DurationSeconds: 90,
+			BucketFolder:      "bucket/master.m3u8",
+		}}
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+	store := newTestStore(t, handler)
+
+	song, err := store.GetSong(context.Background(), "song-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if song.ID != "song-1" || song.Name != "Test" || song.DurationSeconds != 90 {
+		t.Fatalf("unexpected song: %#v", song)
 	}
 }
 
-// fakeRow implements pgx.Row for testing scanSong without a database.
-type fakeRow struct {
-	values []any
-	err    error
-}
-
-func (r fakeRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	if len(dest) != len(r.values) {
-		return errors.New("unexpected number of scan destinations")
-	}
-	for i := range dest {
-		v := reflect.ValueOf(dest[i])
-		if v.Kind() != reflect.Ptr || v.IsNil() {
-			return errors.New("destination must be pointer")
+func TestStoreListSongs(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "order=name.asc") {
+			t.Fatalf("expected order asc query, got %s", r.URL.RawQuery)
 		}
-		val := reflect.ValueOf(r.values[i])
-		if !val.Type().AssignableTo(v.Elem().Type()) {
-			return errors.New("type mismatch")
+		w.Header().Set("Content-Type", "application/json")
+		resp := []Song{
+			{ID: "1", Name: "A"},
+			{ID: "2", Name: "B"},
 		}
-		v.Elem().Set(val)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
-	return nil
+	store := newTestStore(t, handler)
+
+	songs, err := store.ListSongs(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(songs) != 2 {
+		t.Fatalf("expected 2 songs, got %d", len(songs))
+	}
 }
 
-func (fakeRow) Values() ([]any, error) {
-	return nil, nil
+func TestStoreDeleteSong(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "0-0/1")
+		w.WriteHeader(http.StatusOK)
+	}
+	store := newTestStore(t, handler)
+
+	if err := store.DeleteSong(context.Background(), "song-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
-func (fakeRow) FieldDescriptions() []pgconn.FieldDescription {
-	return nil
+func TestStoreDeleteSongNotFound(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "0-0/0")
+		w.WriteHeader(http.StatusOK)
+	}
+	store := newTestStore(t, handler)
+
+	err := store.DeleteSong(context.Background(), "missing")
+	if err == nil || err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
 }
 
-func (fakeRow) RawValues() [][]byte {
-	return nil
-}
+func newTestStore(t *testing.T, handler func(http.ResponseWriter, *http.Request)) *Store {
+	server := httptest.NewServer(http.HandlerFunc(handler))
+	t.Cleanup(server.Close)
 
-func (fakeRow) Conn() *pgx.Conn {
-	return nil
-}
+	t.Setenv("SUPABASE_URL", server.URL)
+	t.Setenv("SUPABASE_SERVICE_KEY", "test-key")
 
-// Ensure fakeRow satisfies the interface at compile time.
-var _ pgx.Row = fakeRow{}
+	store, err := NewStore(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error creating store: %v", err)
+	}
+	return store
+}

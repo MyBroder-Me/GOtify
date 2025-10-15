@@ -1,12 +1,12 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"io"
-	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
+
+	storage_go "github.com/supabase-community/storage-go"
 )
 
 func TestNewBucketClientFromEnvMissing(t *testing.T) {
@@ -19,37 +19,46 @@ func TestNewBucketClientFromEnvMissing(t *testing.T) {
 	}
 }
 
-func TestBucketClientUploadAndDelete(t *testing.T) {
-	type record struct {
-		method string
+type fakeStorage struct {
+	uploads []struct {
+		bucket string
 		path   string
 		body   []byte
-		header http.Header
+		opts   []storage_go.FileOptions
 	}
-	reqCh := make(chan record, 4)
+	deletions [][]string
+}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		reqCh <- record{
-			method: r.Method,
-			path:   r.URL.Path,
-			body:   body,
-			header: r.Header.Clone(),
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	t.Setenv("SUPABASE_URL", server.URL)
-	t.Setenv("SUPABASE_SERVICE_KEY", "test-key")
-	t.Setenv("SUPABASE_BUCKET", "audio")
-
-	client, err := NewBucketClientFromEnv()
+func (f *fakeStorage) UploadFile(bucketID, relativePath string, data io.Reader, fileOptions ...storage_go.FileOptions) (storage_go.FileUploadResponse, error) {
+	body, err := io.ReadAll(data)
 	if err != nil {
-		t.Fatalf("unexpected error creating client: %v", err)
+		return storage_go.FileUploadResponse{}, err
 	}
-	client.httpClient = server.Client()
+	f.uploads = append(f.uploads, struct {
+		bucket string
+		path   string
+		body   []byte
+		opts   []storage_go.FileOptions
+	}{
+		bucket: bucketID,
+		path:   relativePath,
+		body:   body,
+		opts:   append([]storage_go.FileOptions{}, fileOptions...),
+	})
+	return storage_go.FileUploadResponse{}, nil
+}
+
+func (f *fakeStorage) RemoveFile(bucketID string, paths []string) ([]storage_go.FileUploadResponse, error) {
+	f.deletions = append(f.deletions, append([]string{}, paths...))
+	return nil, nil
+}
+
+func TestBucketClientUploadAndDelete(t *testing.T) {
+	fake := &fakeStorage{}
+	client := &BucketClient{
+		storage: fake,
+		bucket:  "audio",
+	}
 
 	ctx := context.Background()
 
@@ -69,49 +78,48 @@ func TestBucketClientUploadAndDelete(t *testing.T) {
 		t.Fatalf("delete prefix failed: %v", err)
 	}
 
-	close(reqCh)
+	if len(fake.uploads) != 3 {
+		t.Fatalf("expected 3 uploads, got %d", len(fake.uploads))
+	}
 
-	var uploads []record
-	var deleteReq *record
-	for rec := range reqCh {
-		switch rec.method {
-		case http.MethodPost:
-			if rec.path == "/storage/v1/object/audio" {
-				copy := rec
-				deleteReq = &copy
-				continue
+	for _, upload := range fake.uploads {
+		if upload.bucket != "audio" {
+			t.Errorf("unexpected bucket %s", upload.bucket)
+		}
+		if !strings.HasPrefix(upload.path, "song/") {
+			t.Errorf("expected upload path under prefix, got %s", upload.path)
+		}
+		var foundUpsert bool
+		for _, opt := range upload.opts {
+			if opt.Upsert != nil && *opt.Upsert {
+				foundUpsert = true
 			}
-			uploads = append(uploads, rec)
-		default:
-			t.Errorf("unexpected method: %s", rec.method)
-		}
-	}
-
-	if len(uploads) < 3 {
-		t.Fatalf("expected multiple upload requests, got %d", len(uploads))
-	}
-	if deleteReq == nil {
-		t.Errorf("expected delete request to be sent")
-	} else {
-		expected := `{"prefixes":["song/"]}`
-		if !bytes.Equal(deleteReq.body, []byte(expected)) {
-			t.Errorf("unexpected delete payload: %s", deleteReq.body)
-		}
-	}
-
-	foundMaster := false
-	for _, upload := range uploads {
-		switch upload.path {
-		case "/storage/v1/object/audio/song/master.m3u8":
-			if !foundMaster {
-				foundMaster = true
-				if !bytes.Equal(upload.body, []byte("#EXTM3U")) && !bytes.Equal(upload.body, []byte("playlist")) {
-					t.Errorf("unexpected master body: %s", upload.body)
-				}
-				if upload.header.Get("Content-Type") == "" {
-					t.Errorf("content type should be set for master upload")
-				}
+			if opt.ContentType != nil && len(*opt.ContentType) == 0 {
+				t.Errorf("content type option should not be empty")
 			}
 		}
+		if !foundUpsert {
+			t.Errorf("upload should set upsert")
+		}
 	}
+
+	if len(fake.deletions) != 1 {
+		t.Fatalf("expected one deletion call, got %d", len(fake.deletions))
+	}
+	expectedDelete := []string{"song/"}
+	if !equalStringSlices(fake.deletions[0], expectedDelete) {
+		t.Errorf("unexpected delete payload: %v", fake.deletions[0])
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
