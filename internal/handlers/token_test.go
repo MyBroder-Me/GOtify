@@ -14,7 +14,7 @@ import (
 )
 
 type tokenResponse struct {
-	File    string `json:"file"`
+	FileID  string `json:"file_id"`
 	Expires int64  `json:"expires"`
 	URL     string `json:"url"`
 }
@@ -26,7 +26,7 @@ func TestTokenHandlerGenerateDefaultTTL(t *testing.T) {
 	handler := NewTokenHandler(secret)
 
 	router := gin.New()
-	router.GET("/token/:file", handler.Generate)
+	router.GET("/token/:file_id", handler.Generate)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/token/track", nil)
@@ -44,8 +44,8 @@ func TestTokenHandlerGenerateDefaultTTL(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if body.File != "track" {
-		t.Fatalf("expected file 'track', got %q", body.File)
+	if body.FileID != "track" {
+		t.Fatalf("expected file 'track', got %q", body.FileID)
 	}
 
 	assertExpiryInRange(t, body.Expires, before.Add(9*time.Minute), after.Add(10*time.Minute+time.Second))
@@ -59,7 +59,7 @@ func TestTokenHandlerGenerateCustomTTL(t *testing.T) {
 	handler := NewTokenHandler(secret)
 
 	router := gin.New()
-	router.GET("/token/:file", handler.Generate)
+	router.GET("/token/:file_id", handler.Generate)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/token/track?ttl=2", nil)
@@ -98,8 +98,8 @@ func assertURLMatchesToken(t *testing.T, body tokenResponse, secret []byte) {
 		t.Fatalf("failed to parse url %q: %v", body.URL, err)
 	}
 
-	if parsed.Path != "/stream/"+body.File {
-		t.Fatalf("expected stream path for %q, got %q", body.File, parsed.Path)
+	if parsed.Path != "/stream/"+body.FileID {
+		t.Fatalf("expected stream path for %q, got %q", body.FileID, parsed.Path)
 	}
 
 	values := parsed.Query()
@@ -115,7 +115,7 @@ func assertURLMatchesToken(t *testing.T, body tokenResponse, secret []byte) {
 	}
 
 	s := &security.Signer{Secret: secret}
-	if !s.Validate(body.File, token, exp) {
+	if !s.Validate(body.FileID, token, exp) {
 		t.Fatal("token in URL does not validate")
 	}
 }

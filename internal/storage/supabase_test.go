@@ -38,7 +38,7 @@ func TestStoreUpsertSong(t *testing.T) {
 	err := store.UpsertSong(context.Background(), Song{
 		ID:              "song-1",
 		Name:            "Test",
-		DurationSeconds: 120,
+		Duration: 120,
 		BucketFolder:      "bucket/master.m3u8",
 	})
 	if err != nil {
@@ -77,7 +77,7 @@ func TestStoreGetSongSuccess(t *testing.T) {
 		resp := []Song{{
 			ID:              "song-1",
 			Name:            "Test",
-			DurationSeconds: 90,
+			Duration: 90,
 			BucketFolder:      "bucket/master.m3u8",
 		}}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -88,7 +88,7 @@ func TestStoreGetSongSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if song.ID != "song-1" || song.Name != "Test" || song.DurationSeconds != 90 {
+	if song.ID != "song-1" || song.Name != "Test" || song.Duration != 90 {
 		t.Fatalf("unexpected song: %#v", song)
 	}
 }

@@ -3,53 +3,178 @@ package handlers
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
-	"os"
-	"path/filepath"
+	"path"
 	"strings"
+
+	"GOtify/internal/storage"
 
 	"github.com/gin-gonic/gin"
 )
 
-type FileHandler struct {
-	root string
+type songLoader interface {
+	GetSong(ctx context.Context, id string) (storage.Song, error)
 }
 
-func NewFileHandler(root string) *FileHandler {
-	return &FileHandler{root: root}
+type bucketDownloader interface {
+	DownloadFile(objectPath string) ([]byte, error)
+	SignedURL(objectPath string, expiresIn int) (string, error)
+}
+
+type FileHandler struct {
+	store      songLoader
+	bucket     bucketDownloader
+	bucketName string
+}
+
+func NewFileHandler(store songLoader, bucket bucketDownloader, bucketName string) *FileHandler {
+	return &FileHandler{
+		store:      store,
+		bucket:     bucket,
+		bucketName: strings.TrimSpace(bucketName),
+	}
 }
 
 func (h *FileHandler) Serve(c *gin.Context) {
-	folder := c.Param("file")
-	raw := c.Param("quality")
-	trimmed := strings.TrimPrefix(raw, "/")
+	songID := c.Param("file_id")
+	log.Println("Requested song ID:", songID)
+	if songID == "" {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
 
-	if strings.Contains(folder, "..") || strings.Contains(trimmed, "..") {
+	rawQuality := c.Param("quality")
+	trimmedQuality := strings.TrimPrefix(rawQuality, "/")
+	if strings.Contains(songID, "..") || strings.Contains(trimmedQuality, "..") {
 		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
-	if trimmed == "" {
-		filename := "master.m3u8"
-		fullPath := filepath.Join(h.root, folder, filename)
-		if err := h.servePlaylist(c, fullPath, c.Request.URL.RawQuery); err != nil {
-			c.AbortWithStatus(http.StatusNotFound)
+	song, err := h.store.GetSong(c.Request.Context(), songID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		c.AbortWithStatus(status)
+		return
+	}
+
+	masterKey, err := h.masterObjectKey(song)
+	if err != nil {
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	objectKey, err := resolveObjectKey(masterKey, rawQuality)
+	if err != nil {
+		if errors.Is(err, errInvalidObjectKey) {
+			c.AbortWithStatus(http.StatusForbidden)
+		} else {
+			c.AbortWithStatus(http.StatusInternalServerError)
 		}
 		return
 	}
 
-	if strings.HasSuffix(strings.ToLower(trimmed), ".m3u8") || !strings.Contains(trimmed, ".") {
-		filename := resolveFilename(raw)
-		fullPath := filepath.Join(h.root, folder, filename)
-		if err := h.servePlaylist(c, fullPath, c.Request.URL.RawQuery); err != nil {
+	if strings.HasSuffix(strings.ToLower(objectKey), ".m3u8") {
+		data, err := h.bucket.DownloadFile(objectKey)
+		if err != nil {
 			c.AbortWithStatus(http.StatusNotFound)
+			return
 		}
+		h.servePlaylist(c, data, c.Request.URL.RawQuery)
 		return
 	}
 
-	fullPath := filepath.Join(h.root, folder, trimmed)
-	c.File(fullPath)
+	const signedTTLSeconds = 60
+	signedURL, err := h.bucket.SignedURL(objectKey, signedTTLSeconds)
+	log.Println("Signed url:", signedURL)
+	if err != nil {
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	c.Redirect(http.StatusTemporaryRedirect, signedURL)
+}
+
+func (h *FileHandler) masterObjectKey(song storage.Song) (string, error) {
+	key := strings.TrimSpace(song.BucketFolder)
+	if key == "" {
+		return "", fmt.Errorf("bucket path missing")
+	}
+
+	if idx := strings.Index(key, "?"); idx != -1 {
+		key = key[:idx]
+	}
+	key = strings.ReplaceAll(key, "\\", "/")
+
+	lower := strings.ToLower(key)
+	if strings.Contains(lower, "/storage/v1/object/") {
+		parts := strings.SplitN(key, "/storage/v1/object/", 2)
+		if len(parts) == 2 {
+			key = parts[1]
+		}
+	}
+
+	key = strings.TrimPrefix(key, "/")
+	key = strings.TrimPrefix(key, "public/")
+
+	if h.bucketName != "" {
+		prefix := strings.Trim(h.bucketName, "/")
+		if prefix != "" && strings.HasPrefix(key, prefix+"/") {
+			key = key[len(prefix)+1:]
+		}
+	}
+
+	if key == "" || strings.Contains(key, "..") {
+		return "", fmt.Errorf("invalid bucket path")
+	}
+
+	if !strings.HasSuffix(strings.ToLower(key), ".m3u8") {
+		return path.Join(key, "master.m3u8"), nil
+	}
+	return key, nil
+}
+
+var errInvalidObjectKey = errors.New("invalid object key")
+
+func resolveObjectKey(masterKey string, rawQuality string) (string, error) {
+	baseDir := path.Dir(masterKey)
+
+	raw := strings.TrimPrefix(rawQuality, "/")
+	if raw == "" || raw == "/" {
+		return masterKey, nil
+	}
+
+	if strings.Contains(raw, "..") {
+		return "", errInvalidObjectKey
+	}
+
+	lower := strings.ToLower(raw)
+	var target string
+	if strings.HasSuffix(lower, ".m3u8") || !strings.Contains(raw, ".") {
+		target = resolveFilename(rawQuality)
+	} else {
+		target = raw
+	}
+
+	clean := path.Clean(path.Join(baseDir, target))
+	if strings.HasPrefix(clean, "../") || clean == ".." {
+		return "", errInvalidObjectKey
+	}
+	return clean, nil
+}
+
+func (h *FileHandler) servePlaylist(c *gin.Context, data []byte, query string) {
+	if query == "" {
+		c.Data(http.StatusOK, "application/vnd.apple.mpegurl", data)
+		return
+	}
+	rewritten := rewritePlaylist(data, query)
+	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", rewritten)
 }
 
 func resolveFilename(raw string) string {
@@ -64,22 +189,6 @@ func resolveFilename(raw string) string {
 	}
 
 	return name + ".m3u8"
-}
-
-func (h *FileHandler) servePlaylist(c *gin.Context, path string, query string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	if query == "" {
-		c.Data(http.StatusOK, "application/vnd.apple.mpegurl", data)
-		return nil
-	}
-	rewritten := rewritePlaylist(data, query)
-	fmt.Println("Rewritted playlist:", string(rewritten))
-	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", rewritten)
-	return nil
 }
 
 func rewritePlaylist(data []byte, query string) []byte {
@@ -97,14 +206,6 @@ func rewritePlaylist(data []byte, query string) []byte {
 		trimmed := strings.TrimSpace(content)
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 			rewritten := trimmed
-
-			// if prefix != "" && needsRelativePrefix(trimmed, prefix) {
-			// 	if idx := strings.Index(rewritten, "?"); idx != -1 {
-			// 		rewritten = prefix + rewritten[:idx] + rewritten[idx:]
-			// 	} else {
-			// 		rewritten = prefix + rewritten
-			// 	}
-			// }
 
 			if strings.Contains(rewritten, "?") {
 				rewritten += "&" + query
@@ -138,30 +239,4 @@ func rewritePlaylist(data []byte, query string) []byte {
 	}
 
 	return []byte(builder.String())
-}
-
-func needsRelativePrefix(value string, prefix string) bool {
-	if prefix == "" {
-		return false
-	}
-
-	base := value
-	if idx := strings.IndexAny(base, "?#"); idx != -1 {
-		base = base[:idx]
-	}
-
-	lowerBase := strings.ToLower(base)
-	if strings.HasPrefix(base, "/") || strings.HasPrefix(base, prefix) {
-		return false
-	}
-	if strings.HasPrefix(lowerBase, "http://") || strings.HasPrefix(lowerBase, "https://") || strings.HasPrefix(lowerBase, "data:") {
-		return false
-	}
-	if strings.HasPrefix(base, "//") {
-		return false
-	}
-	if strings.Contains(base, "/") {
-		return false
-	}
-	return strings.HasSuffix(strings.ToLower(base), ".m3u8")
 }

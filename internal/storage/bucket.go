@@ -16,6 +16,8 @@ import (
 type storageClient interface {
 	UploadFile(bucketID, relativePath string, data io.Reader, fileOptions ...storage_go.FileOptions) (storage_go.FileUploadResponse, error)
 	RemoveFile(bucketID string, paths []string) ([]storage_go.FileUploadResponse, error)
+	DownloadFile(bucketID string, filePath string, urlOptions ...storage_go.UrlOptions) ([]byte, error)
+	CreateSignedUrl(bucketId string, filePath string, expiresIn int) (storage_go.SignedUrlResponse, error)
 }
 type BucketClient struct {
 	storage storageClient
@@ -85,4 +87,23 @@ func (c *BucketClient) DeletePrefix(_ context.Context, prefix string) error {
 	}
 	_, err := c.storage.RemoveFile(c.bucket, []string{clean + "/"})
 	return err
+}
+
+// DownloadFile recupera un objeto sin exponer la URL pública.
+func (c *BucketClient) DownloadFile(objectPath string) ([]byte, error) {
+	key := strings.TrimLeft(objectPath, "/")
+	return c.storage.DownloadFile(c.bucket, key)
+}
+
+// SignedURL genera una URL temporal firmada para acceder al objeto directamente.
+func (c *BucketClient) SignedURL(objectPath string, expiresIn int) (string, error) {
+	key := strings.TrimLeft(objectPath, "/")
+	if expiresIn <= 0 {
+		expiresIn = 60
+	}
+	resp, err := c.storage.CreateSignedUrl(c.bucket, key, expiresIn)
+	if err != nil {
+		return "", err
+	}
+	return resp.SignedURL, nil
 }

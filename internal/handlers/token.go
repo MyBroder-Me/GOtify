@@ -18,7 +18,7 @@ func NewTokenHandler(secret []byte) *TokenHandler {
 }
 
 func (h *TokenHandler) Generate(c *gin.Context) {
-	file := c.Param("file")
+	file := c.Param("file_id")
 
 	ttl := 10 * time.Minute
 	if v := c.Query("ttl"); v != "" {
@@ -29,7 +29,7 @@ func (h *TokenHandler) Generate(c *gin.Context) {
 
 	token, exp := h.signer.Generate(file, ttl)
 	c.JSON(http.StatusOK, gin.H{
-		"file":    file,
+		"file_id":    file,
 		"expires": exp,
 		"url":     "/stream/" + file + "?t=" + token + "&e=" + strconv.FormatInt(exp, 10),
 	})

@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -57,11 +58,12 @@ func New(root string) *Server {
 
 	// Handlers
 	hToken := handlers.NewTokenHandler(secret)
-	hFile := handlers.NewFileHandler(root)
 	bucketClient, err := storage.NewBucketClientFromEnv()
 	if err != nil {
 		panic(err)
 	}
+	bucketName := strings.TrimSpace(os.Getenv("SUPABASE_BUCKET"))
+	hFile := handlers.NewFileHandler(store, bucketClient, bucketName)
 	segmentSeconds := parseSegmentSeconds(os.Getenv("HLS_SEGMENT_SECONDS"))
 	variantCfg := parseVariantConfig(os.Getenv("HLS_AUDIO_VARIANTS"))
 	handlerCfg := handlers.SongHandlerConfig{
@@ -80,10 +82,10 @@ func New(root string) *Server {
 	r.GET("/health", func(c *gin.Context) {
 		c.Status(http.StatusOK)
 	})
-	r.GET("/token/:file", hToken.Generate)
+	r.GET("/token/:file_id", hToken.Generate)
 	authorized := r.Group("/stream", AuthMiddleware(secret))
 	{
-		authorized.GET("/:file/*quality", hFile.Serve)
+		authorized.GET("/:file_id/*quality", hFile.Serve)
 	}
 	r.POST("/songs", hSong.Create)
 	r.GET("/songs", hSong.List)
@@ -125,10 +127,14 @@ func AuthMiddleware(secret []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.Query("t")
 		expires := c.Query("e")
-		file := c.Param("file")
+		file := c.Param("file_id")
+		if file == "" {
+			file = c.Param("file")
+		}
 
 		et, _ := strconv.ParseInt(expires, 10, 64)
 		if et < time.Now().Unix() {
+			log.Println("Token expired:", et, "<", time.Now().Unix())
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
@@ -139,6 +145,7 @@ func AuthMiddleware(secret []byte) gin.HandlerFunc {
 		expected := hex.EncodeToString(mac.Sum(nil))
 
 		if !hmac.Equal([]byte(token), []byte(expected)) {
+			log.Println("Invalid token:", token, "!=", expected, "for msg:", msg)
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}

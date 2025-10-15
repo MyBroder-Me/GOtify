@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -58,7 +57,7 @@ func TestSongHandlerCreate(t *testing.T) {
 		t.Fatalf("expected status 201, got %d body=%s", code, resp)
 	}
 
-	var created songResponse
+	var created storage.Song
 	if err := json.Unmarshal([]byte(resp), &created); err != nil {
 		t.Fatalf("invalid response json: %v", err)
 	}
@@ -80,10 +79,10 @@ func TestSongHandlerCreate(t *testing.T) {
 	if !ok {
 		t.Fatalf("song not persisted")
 	}
-	if song.BucketFolder == "" {
-		t.Errorf("bucket folder not set")
+	if song.BucketFolder != "my-song" {
+		t.Errorf("bucket folder unexpected: %s", song.BucketFolder)
 	}
-	if song.DurationSeconds == 0 {
+	if song.Duration == 0 {
 		t.Errorf("duration not populated")
 	}
 }
@@ -95,8 +94,8 @@ func TestSongHandlerUpdateRegeneratesAssets(t *testing.T) {
 	store.songs["song-1"] = storage.Song{
 		ID:              "song-1",
 		Name:            "Old Song",
-		DurationSeconds: 200,
-		BucketFolder:    "https://example.com/storage/old-song/master.m3u8",
+		Duration: 200,
+		BucketFolder:    "old-song",
 	}
 
 	bucket := &fakeBucket{}
@@ -145,10 +144,10 @@ func TestSongHandlerUpdateRegeneratesAssets(t *testing.T) {
 	if updated.Name != "New Song" {
 		t.Errorf("unexpected name: %s", updated.Name)
 	}
-	if !strings.Contains(updated.BucketFolder, "new-song") {
+	if updated.BucketFolder != "new-song" {
 		t.Errorf("bucket folder not updated: %s", updated.BucketFolder)
 	}
-	if updated.DurationSeconds == existingBefore.DurationSeconds {
+	if updated.Duration == existingBefore.Duration {
 		t.Errorf("duration not recalculated")
 	}
 }
@@ -160,7 +159,7 @@ func TestSongHandlerDelete(t *testing.T) {
 	store.songs["song-1"] = storage.Song{
 		ID:           "song-1",
 		Name:         "Song",
-		BucketFolder: "https://example.com/storage/song/master.m3u8",
+		BucketFolder: "song",
 	}
 
 	bucket := &fakeBucket{}
