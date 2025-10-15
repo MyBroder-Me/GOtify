@@ -62,7 +62,7 @@ type songResponse struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Duration   int32  `json:"duration"`
-	BucketPath string `json:"bucket_path"`
+	BucketFolder string `json:"bucket_folder"`
 }
 
 var slugRegex = regexp.MustCompile(`[^a-z0-9]+`)
@@ -161,12 +161,12 @@ func (h *SongHandler) Create(c *gin.Context) {
 		return
 	}
 
-	bucketPath := joinBucketPath(h.bucketBaseURL, slug, "master.m3u8")
+	bucketFolder := joinBucketPath(h.bucketBaseURL, slug, "master.m3u8")
 	song := storage.Song{
 		ID:              uuid.NewString(),
 		Name:            body.Name,
 		DurationSeconds: durationSeconds,
-		BucketPath:      bucketPath,
+		BucketFolder:      bucketFolder,
 	}
 
 	if err := h.store.UpsertSong(c.Request.Context(), song); err != nil {
@@ -241,9 +241,9 @@ func (h *SongHandler) Update(c *gin.Context) {
 
 	regenerate := strings.TrimSpace(body.SourcePath) != ""
 
-	existingFolder := h.folderFromBucketPath(existing.BucketPath)
+	existingFolder := h.folderFromBucketPath(existing.BucketFolder)
 	targetFolder := existingFolder
-	targetBucketPath := existing.BucketPath
+	targetBucketFolder := existing.BucketFolder
 	durationSeconds := existing.DurationSeconds
 
 	if regenerate {
@@ -284,14 +284,14 @@ func (h *SongHandler) Update(c *gin.Context) {
 			writeError(c, http.StatusBadGateway, err)
 			return
 		}
-		targetBucketPath = joinBucketPath(h.bucketBaseURL, targetFolder, "master.m3u8")
+		targetBucketFolder = joinBucketPath(h.bucketBaseURL, targetFolder, "master.m3u8")
 	} else {
 		// Mantiene los assets existentes; solo se actualiza metadata.
 		if existingFolder == "" {
 			targetFolder = newSlug
-			targetBucketPath = joinBucketPath(h.bucketBaseURL, targetFolder, "master.m3u8")
+			targetBucketFolder = joinBucketPath(h.bucketBaseURL, targetFolder, "master.m3u8")
 		} else {
-			targetBucketPath = existing.BucketPath
+			targetBucketFolder = existing.BucketFolder
 		}
 	}
 
@@ -299,7 +299,7 @@ func (h *SongHandler) Update(c *gin.Context) {
 		ID:              existing.ID,
 		Name:            body.Name,
 		DurationSeconds: durationSeconds,
-		BucketPath:      targetBucketPath,
+		BucketFolder:      targetBucketFolder,
 	}
 
 	if err := h.store.UpsertSong(c.Request.Context(), updated); err != nil {
@@ -327,7 +327,7 @@ func (h *SongHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	folder := h.folderFromBucketPath(song.BucketPath)
+	folder := h.folderFromBucketPath(song.BucketFolder)
 	if folder != "" {
 		if err := h.bucket.DeletePrefix(c.Request.Context(), folder); err != nil {
 			writeError(c, http.StatusBadGateway, err)
@@ -348,7 +348,7 @@ func songToResponse(s storage.Song) songResponse {
 		ID:         s.ID,
 		Name:       s.Name,
 		Duration:   s.DurationSeconds,
-		BucketPath: s.BucketPath,
+		BucketFolder: s.BucketFolder,
 	}
 }
 
